@@ -4,6 +4,7 @@ import type { ShellState } from "../shared/types";
 
 const api: FourScreenApi = {
   clearPanel: (request) => ipcRenderer.invoke("panel:clear", request),
+  clearPanelHistory: (request) => ipcRenderer.invoke("panel:clear-history", request),
   closeActivePanelTab: (request) => ipcRenderer.invoke("panel:close-active-tab", request),
   closePanelPopups: (request) => ipcRenderer.invoke("panel:close-popups", request),
   closePanelTab: (request) => ipcRenderer.invoke("panel:close-tab", request),
@@ -25,6 +26,7 @@ const api: FourScreenApi = {
   setActivePanel: (request) => ipcRenderer.invoke("shell:set-active-panel", request),
   setChromeHeight: (height) => ipcRenderer.invoke("shell:chrome-height", height),
   setControlsVisible: (request) => ipcRenderer.invoke("panel:controls-visible", request),
+  setSiteMenuOpen: (request) => ipcRenderer.invoke("panel:site-menu-open", request),
   restorePrimaryTab: (request) => ipcRenderer.invoke("panel:restore-primary", request),
   switchPanelTab: (request) => ipcRenderer.invoke("panel:switch-tab", request),
   toggleAudioLock: (request) => ipcRenderer.invoke("panel:toggle-audio-lock", request),

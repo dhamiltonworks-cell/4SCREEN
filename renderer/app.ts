@@ -1,5 +1,12 @@
 import type { FourScreenApi } from "../shared/ipc";
 import { getAllCellBounds, toShellPanelBounds } from "../shared/layout";
+import {
+  getShortcutFaviconUrl,
+  getSiteDomainFromUrl,
+  getSiteLabelFromUrl,
+  SITE_SHORTCUTS,
+  type SiteShortcut,
+} from "../shared/site-shortcuts";
 import { PANEL_COUNT, type ShellState } from "../shared/types";
 
 declare global {
@@ -21,11 +28,13 @@ type PanelUi = {
   focusButton: HTMLButtonElement;
   form: HTMLFormElement;
   forwardButton: HTMLButtonElement;
+  historyButton: HTMLButtonElement;
   index: number;
   input: HTMLInputElement;
   loadButton: HTMLButtonElement;
   refreshButton: HTMLButtonElement;
   root: HTMLElement;
+  siteMenu: HTMLElement;
   statusBadge: HTMLElement;
   tabRow: HTMLElement;
   tabEscape: HTMLElement;
@@ -37,9 +46,230 @@ type PanelUi = {
 
 const panelUi: PanelUi[] = [];
 let currentFocusedPanelIndex: number | null = null;
+let openSiteMenuIndex: number | null = null;
+let latestShellState: ShellState | null = null;
 
 function getPanelLabel(index: number) {
   return `Screen ${index + 1}`;
+}
+
+function closeSiteMenus() {
+  if (openSiteMenuIndex === null) {
+    return;
+  }
+
+  const closedIndex = openSiteMenuIndex;
+  const ui = panelUi[closedIndex];
+  if (ui) {
+    ui.siteMenu.hidden = true;
+    ui.historyButton.classList.remove("button--history-active");
+  }
+  openSiteMenuIndex = null;
+  void window.fourScreen.setSiteMenuOpen({ index: closedIndex, open: false });
+}
+
+function appendSiteIconFallback(icon: HTMLElement, badge: string, className?: string) {
+  const fallback = document.createElement("span");
+  fallback.className = className
+    ? `panel__site-icon-fallback ${className}`
+    : "panel__site-icon-fallback";
+  fallback.textContent = badge;
+  icon.append(fallback);
+}
+
+function createSiteIcon(name: string, domain: string, shortcut?: SiteShortcut) {
+  const icon = document.createElement("span");
+  icon.className = "panel__site-icon";
+
+  const image = document.createElement("img");
+  image.className = "panel__site-icon-image";
+  image.alt = "";
+  image.loading = "lazy";
+  image.referrerPolicy = "no-referrer";
+  image.src = getShortcutFaviconUrl(domain);
+  image.addEventListener("error", () => {
+    image.remove();
+    if (shortcut?.fallbackBadge) {
+      appendSiteIconFallback(icon, shortcut.fallbackBadge, shortcut.fallbackClass);
+      return;
+    }
+    appendSiteIconFallback(icon, name.slice(0, 1).toUpperCase());
+  });
+
+  icon.append(image);
+  return icon;
+}
+
+function renderSiteMenu(ui: PanelUi, panel: ShellState["panels"][number]) {
+  const shortcutGrid = ui.siteMenu.querySelector<HTMLElement>('[data-role="shortcut-grid"]');
+  const historyList = ui.siteMenu.querySelector<HTMLElement>('[data-role="history-list"]');
+  const clearHistoryButton = ui.siteMenu.querySelector<HTMLButtonElement>('[data-role="clear-history"]');
+  if (!shortcutGrid || !historyList || !clearHistoryButton) {
+    return;
+  }
+
+  shortcutGrid.innerHTML = "";
+  SITE_SHORTCUTS.forEach((shortcut) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "panel__site-menu-item panel__site-menu-item--shortcut";
+    button.dataset.shortcutUrl = shortcut.url;
+    button.title = shortcut.url;
+    button.append(createSiteIcon(shortcut.name, shortcut.domain, shortcut));
+
+    const label = document.createElement("span");
+    label.className = "panel__site-menu-label";
+    label.textContent = shortcut.name;
+    button.append(label);
+    shortcutGrid.append(button);
+  });
+
+  historyList.innerHTML = "";
+  if (panel.recentUrls.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "panel__history-empty";
+    empty.textContent = "No recent sites yet.";
+    historyList.append(empty);
+    clearHistoryButton.hidden = true;
+    return;
+  }
+
+  clearHistoryButton.hidden = false;
+  panel.recentUrls.forEach((url) => {
+    const domain = getSiteDomainFromUrl(url);
+    const labelText = getSiteLabelFromUrl(url);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "panel__site-menu-item panel__site-menu-item--history";
+    button.dataset.historyUrl = url;
+    button.title = url;
+
+    const head = document.createElement("div");
+    head.className = "panel__site-menu-history-head";
+    head.append(createSiteIcon(labelText, domain || labelText));
+
+    const label = document.createElement("span");
+    label.className = "panel__site-menu-label";
+    label.textContent = labelText;
+    head.append(label);
+    button.append(head);
+
+    const urlLine = document.createElement("span");
+    urlLine.className = "panel__site-menu-url";
+    urlLine.textContent = url;
+    button.append(urlLine);
+    historyList.append(button);
+  });
+}
+
+function bindSiteMenu(ui: PanelUi) {
+  ui.siteMenu.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    const shortcutButton = target.closest<HTMLButtonElement>("[data-shortcut-url]");
+    if (shortcutButton?.dataset.shortcutUrl) {
+      void loadPanel(ui.index, shortcutButton.dataset.shortcutUrl);
+      return;
+    }
+
+    const historyButton = target.closest<HTMLButtonElement>("[data-history-url]");
+    if (historyButton?.dataset.historyUrl) {
+      void loadPanel(ui.index, historyButton.dataset.historyUrl);
+    }
+  });
+
+  ui.siteMenu.addEventListener("mousedown", (event) => {
+    event.stopPropagation();
+  });
+}
+
+function toggleSiteMenu(index: number) {
+  const ui = panelUi[index];
+  if (!ui) {
+    return;
+  }
+
+  if (openSiteMenuIndex === index) {
+    closeSiteMenus();
+    return;
+  }
+
+  closeSiteMenus();
+  openSiteMenuIndex = index;
+  ui.siteMenu.hidden = false;
+  ui.historyButton.classList.add("button--history-active");
+  if (latestShellState?.panels[index]) {
+    renderSiteMenu(ui, latestShellState.panels[index]);
+  }
+  void window.fourScreen.setSiteMenuOpen({ index, open: true });
+  void window.fourScreen.pinPanelControls({ index, pinned: true });
+  void window.fourScreen.setControlsVisible({ index, visible: true });
+}
+
+function setupSiteMenuDismiss() {
+  document.addEventListener("click", (event) => {
+    if (openSiteMenuIndex === null) {
+      return;
+    }
+
+    const ui = panelUi[openSiteMenuIndex];
+    if (ui && event.target instanceof Node && ui.siteMenu.contains(event.target)) {
+      return;
+    }
+
+    const index = openSiteMenuIndex;
+    closeSiteMenus();
+    void window.fourScreen.pinPanelControls({ index, pinned: false });
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      if (openSiteMenuIndex === null) {
+        return;
+      }
+      const index = openSiteMenuIndex;
+      closeSiteMenus();
+      void window.fourScreen.pinPanelControls({ index, pinned: false });
+    }
+  });
+}
+
+async function loadPanel(index: number, url?: string) {
+  const ui = panelUi[index];
+  if (!ui) {
+    return;
+  }
+
+  const hadOpenMenu = openSiteMenuIndex === index;
+  if (url !== undefined) {
+    ui.input.value = url;
+  }
+
+  closeSiteMenus();
+  if (hadOpenMenu) {
+    void window.fourScreen.pinPanelControls({ index, pinned: false });
+  }
+
+  try {
+    ui.error.hidden = true;
+    const nextState = await window.fourScreen.loadPanel({ index, input: ui.input.value });
+    renderShellState(nextState);
+  } catch (error) {
+    ui.error.hidden = false;
+    ui.error.textContent = error instanceof Error ? error.message : "Unable to load this URL.";
+  }
+}
+
+async function clearPanelHistory(index: number) {
+  const nextState = await window.fourScreen.clearPanelHistory({ index });
+  closeSiteMenus();
+  renderShellState(nextState);
 }
 
 function mountPanels() {
@@ -81,14 +311,30 @@ function mountPanels() {
             placeholder="${EMPTY_MESSAGE}"
             aria-label="${getPanelLabel(index)} URL"
           />
-          <div class="panel__actions">
-            <button class="button button--icon" data-action="back" type="button" aria-label="Back" title="Back">←</button>
-            <button class="button button--icon" data-action="forward" type="button" aria-label="Forward" title="Forward">→</button>
-            <button class="button button--icon" data-action="refresh" type="button" aria-label="Refresh" title="Refresh">↻</button>
-            <button class="button button--icon button--load" data-action="load" type="submit" aria-label="Load" title="Load">⏎</button>
-            <button class="button button--icon" data-action="external" type="button" aria-label="Open in browser" title="Open Tab">□</button>
-            <button class="button button--icon button--focus" data-action="focus" type="button" aria-label="Focus panel" title="Focus">◎</button>
-            <button class="button button--icon button--danger" data-action="clear" type="button" aria-label="Clear panel" title="Clear">✕</button>
+          <div class="panel__actions-wrap" data-role="actions-wrap">
+            <div class="panel__actions">
+              <button class="button button--icon" data-action="back" type="button" aria-label="Back" title="Back">←</button>
+              <button class="button button--icon" data-action="forward" type="button" aria-label="Forward" title="Forward">→</button>
+              <button class="button button--icon" data-action="refresh" type="button" aria-label="Refresh" title="Refresh">↻</button>
+              <button class="button button--icon button--history" data-action="history" type="button" aria-label="History and shortcuts" title="History & shortcuts">⏱</button>
+              <button class="button button--icon button--load" data-action="load" type="submit" aria-label="Load" title="Load">⏎</button>
+              <button class="button button--icon" data-action="external" type="button" aria-label="Open in browser" title="Open Tab">□</button>
+              <button class="button button--icon button--focus" data-action="focus" type="button" aria-label="Focus panel" title="Focus">◎</button>
+              <button class="button button--icon button--danger" data-action="clear" type="button" aria-label="Clear panel" title="Clear">✕</button>
+            </div>
+            <div class="panel__site-menu" data-role="site-menu" hidden>
+              <div class="panel__site-menu-section">
+                <p class="panel__site-menu-heading">Quick launch</p>
+                <div class="panel__shortcut-grid" data-role="shortcut-grid"></div>
+              </div>
+              <div class="panel__site-menu-section">
+                <div class="panel__site-menu-heading-row">
+                  <p class="panel__site-menu-heading">Recent</p>
+                  <button class="panel__site-menu-clear" data-role="clear-history" type="button">Clear</button>
+                </div>
+                <div class="panel__history-list" data-role="history-list"></div>
+              </div>
+            </div>
           </div>
         </form>
         <p class="panel__error" data-role="error" hidden></p>
@@ -112,6 +358,7 @@ function mountPanels() {
     const backButton = root.querySelector<HTMLButtonElement>('[data-action="back"]');
     const forwardButton = root.querySelector<HTMLButtonElement>('[data-action="forward"]');
     const refreshButton = root.querySelector<HTMLButtonElement>('[data-action="refresh"]');
+    const historyButton = root.querySelector<HTMLButtonElement>('[data-action="history"]');
     const loadButton = root.querySelector<HTMLButtonElement>('[data-action="load"]');
     const externalButton = root.querySelector<HTMLButtonElement>('[data-action="external"]');
     const clearButton = root.querySelector<HTMLButtonElement>('[data-action="clear"]');
@@ -121,6 +368,7 @@ function mountPanels() {
     const closeTabButton = root.querySelector<HTMLButtonElement>('[data-action="close-tab"]');
     const closePopupsButton = root.querySelector<HTMLButtonElement>('[data-action="close-popups"]');
     const audioBadge = root.querySelector<HTMLButtonElement>('[data-role="audio-badge"]');
+    const siteMenu = root.querySelector<HTMLElement>('[data-role="site-menu"]');
     const statusBadge = root.querySelector<HTMLElement>('[data-role="badge"]');
 
     if (
@@ -134,6 +382,7 @@ function mountPanels() {
       !backButton ||
       !forwardButton ||
       !refreshButton ||
+      !historyButton ||
       !loadButton ||
       !externalButton ||
       !clearButton ||
@@ -143,6 +392,7 @@ function mountPanels() {
       !closeTabButton ||
       !closePopupsButton ||
       !audioBadge ||
+      !siteMenu ||
       !statusBadge
     ) {
       continue;
@@ -185,6 +435,17 @@ function mountPanels() {
       void window.fourScreen.refreshPanel({ index });
     });
 
+    historyButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleSiteMenu(index);
+    });
+
+    const clearHistoryButton = siteMenu.querySelector<HTMLButtonElement>('[data-role="clear-history"]');
+    clearHistoryButton?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void clearPanelHistory(index);
+    });
+
     externalButton.addEventListener("click", () => {
       void window.fourScreen.openExternal({ index });
     });
@@ -221,11 +482,13 @@ function mountPanels() {
       focusButton,
       form,
       forwardButton,
+      historyButton,
       index,
       input,
       loadButton,
       refreshButton,
       root,
+      siteMenu,
       statusBadge,
       tabRow,
       tabEscape,
@@ -234,6 +497,9 @@ function mountPanels() {
       tabs,
       urlLine,
     };
+
+    bindSiteMenu(panelUi[index]);
+
     grid.appendChild(root);
   }
 }
@@ -329,6 +595,7 @@ function applyPanelLayout(focusedPanelIndex: number | null) {
 }
 
 function renderShellState(nextState: ShellState) {
+  latestShellState = nextState;
   const focusChanged = currentFocusedPanelIndex !== nextState.focusedPanelIndex;
   currentFocusedPanelIndex = nextState.focusedPanelIndex;
 
@@ -352,6 +619,10 @@ function renderShellState(nextState: ShellState) {
       nextState.audioLockedPanelIndex !== index &&
       nextState.activePanelIndex === index;
     const controlsHidden = hasUrl && !panel.controlsVisible;
+
+    if (controlsHidden && openSiteMenuIndex === index) {
+      closeSiteMenus();
+    }
 
     if (document.activeElement !== ui.input) {
       ui.input.value = panel.input;
@@ -422,23 +693,15 @@ function renderShellState(nextState: ShellState) {
     ui.forwardButton.toggleAttribute("disabled", !panel.canGoForward);
     ui.refreshButton.toggleAttribute("disabled", !hasUrl);
     ui.externalButton.toggleAttribute("disabled", !hasUrl);
+
+    if (openSiteMenuIndex === index) {
+      ui.siteMenu.hidden = false;
+      ui.historyButton.classList.add("button--history-active");
+    } else {
+      ui.siteMenu.hidden = true;
+      ui.historyButton.classList.remove("button--history-active");
+    }
   });
-}
-
-async function loadPanel(index: number) {
-  const ui = panelUi[index];
-  if (!ui) {
-    return;
-  }
-
-  try {
-    ui.error.hidden = true;
-    const nextState = await window.fourScreen.loadPanel({ index, input: ui.input.value });
-    renderShellState(nextState);
-  } catch (error) {
-    ui.error.hidden = false;
-    ui.error.textContent = error instanceof Error ? error.message : "Unable to load this URL.";
-  }
 }
 
 async function clearPanel(index: number) {
@@ -479,6 +742,7 @@ function observeChromeHeight() {
 
 async function bootstrap() {
   mountPanels();
+  setupSiteMenuDismiss();
   applyPanelLayout(null);
   observeChromeHeight();
   const nextState = await window.fourScreen.getShellState();

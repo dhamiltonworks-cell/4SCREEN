@@ -1,8 +1,9 @@
 {
   "name": "4screen",
-  "version": "0.2.0",
+  "version": "1.0.1",
   "private": true,
-  "description": "FourScreen desktop app with four independent browser panels.",
+  "description": "View multiple websites, streams, dashboards, and tools simultaneously.",
+  "author": "FourScreen",
   "main": "dist/electron/main.js",
   "scripts": {
     "dev": "npm run build && electron .",
@@ -11,15 +12,70 @@
     "build:renderer": "esbuild renderer/app.ts --bundle --outfile=dist/renderer/app.js --format=iife --platform=browser --target=es2022",
     "build:static": "mkdir -p dist/renderer && cp renderer/index.html renderer/styles.css dist/renderer/",
     "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
     "lint": "eslint electron renderer shared",
     "typecheck": "tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.renderer.json",
     "compile": "tsc -p tsconfig.electron.json"
+  },
+  "build": {
+    "appId": "com.fourscreen.app",
+    "productName": "FourScreen",
+    "copyright": "Copyright © 2026 FourScreen",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icons/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "FourScreen-${version}-mac-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "FourScreen ${version}",
+      "icon": "build/icons/icon.icns"
+    },
+    "win": {
+      "icon": "build/icons/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "FourScreen-${version}-win-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "FourScreen"
+    }
   },
   "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^9.28.0",
     "@types/node": "^22.15.29",
     "electron": "^35.1.5",
+    "electron-builder": "^26.0.12",
     "esbuild": "^0.25.5",
     "eslint": "^9.28.0",
     "typescript": "^5.8.3",

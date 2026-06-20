@@ -1,8 +1,8 @@
 import { PANEL_COUNT } from "./types";
 
-export const SHELL_PADDING = 10;
-export const SHELL_GAP = 10;
-export const FOCUS_WIDTH_RATIO = 0.7;
+export const SHELL_PADDING = 4;
+export const SHELL_GAP = 4;
+export const FOCUS_WIDTH_RATIO = 0.72;
 export const LAYOUT_ANIMATION_MS = 320;
 
 export type Bounds = {
@@ -19,8 +19,8 @@ export type WindowSize = {
 
 function getContentArea(size: WindowSize) {
   return {
-    contentHeight: size.height - SHELL_PADDING * 2 - SHELL_GAP,
-    contentWidth: size.width - SHELL_PADDING * 2 - SHELL_GAP,
+    contentHeight: size.height - SHELL_PADDING * 2,
+    contentWidth: size.width - SHELL_PADDING * 2,
   };
 }
 

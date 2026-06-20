@@ -23,6 +23,7 @@ export type PanelState = {
   activeTabId: string;
   hasPopups: boolean;
   activeTabIsPopup: boolean;
+  recentUrls: string[];
 };
 
 export type PanelsSnapshot = PanelState[];
@@ -43,6 +44,11 @@ export type PanelLoadRequest = {
 
 export type PanelIndexRequest = {
   index: number;
+};
+
+export type SiteMenuOpenRequest = {
+  index: number;
+  open: boolean;
 };
 
 export type PanelTabRequest = {

@@ -6,6 +6,7 @@ import type {
   PinControlsRequest,
   SetActivePanelRequest,
   ShellState,
+  SiteMenuOpenRequest,
 } from "./types";
 
 export type FourScreenApi = {
@@ -22,9 +23,11 @@ export type FourScreenApi = {
   openExternal: (request: PanelIndexRequest) => Promise<void>;
   pinPanelControls: (request: PinControlsRequest) => Promise<void>;
   refreshPanel: (request: PanelIndexRequest) => Promise<ShellState>;
+  clearPanelHistory: (request: PanelIndexRequest) => Promise<ShellState>;
   setActivePanel: (request: SetActivePanelRequest) => Promise<void>;
   setChromeHeight: (height: number) => Promise<void>;
   setControlsVisible: (request: ControlsVisibilityRequest) => Promise<void>;
+  setSiteMenuOpen: (request: SiteMenuOpenRequest) => Promise<void>;
   restorePrimaryTab: (request: PanelIndexRequest) => Promise<ShellState>;
   switchPanelTab: (request: PanelTabRequest) => Promise<ShellState>;
   toggleAudioLock: (request: PanelIndexRequest) => Promise<ShellState>;

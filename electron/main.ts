@@ -11,8 +11,10 @@ import {
   type InteractionSource,
   type SetActivePanelRequest,
   type ShellState,
+  type SiteMenuOpenRequest,
 } from "../shared/types";
 import { preparePanelUrl } from "../shared/url";
+import { createEmptyPanelHistory } from "../shared/panel-history";
 import {
   easeInOutCubic,
   getAllCellBounds,
@@ -21,7 +23,13 @@ import {
   LAYOUT_ANIMATION_MS,
   type Bounds,
 } from "../shared/layout";
-import { readStoredUrls, writeStoredUrls } from "./panel-store";
+import {
+  clearStoredPanelHistory,
+  readStoredPanelHistory,
+  readStoredUrls,
+  recordStoredPanelHistory,
+  writeStoredUrls,
+} from "./panel-store";
 import {
   createTabId,
   getActiveTab,
@@ -139,6 +147,25 @@ type PanelRuntimeRef = PanelRuntime;
 let mainWindow: BrowserWindow | null = null;
 let shellView: WebContentsView | null = null;
 const panels: PanelRuntimeRef[] = [];
+let panelHistory: string[][] = createEmptyPanelHistory();
+let siteMenuOpenPanelIndex: number | null = null;
+
+function recordPanelHistory(panelIndex: number, url: string) {
+  panelHistory = recordStoredPanelHistory(panelIndex, url);
+}
+
+function maybeRecordActiveTabHistory(panel: PanelRuntimeRef, tab: PanelTab, url: string) {
+  if (tab.id !== panel.activeTabId) {
+    return;
+  }
+  recordPanelHistory(panel.panelIndex, url);
+}
+
+function clearPanelHistory(panelIndex: number) {
+  panelHistory = clearStoredPanelHistory(panelIndex);
+  broadcastShellState();
+  return toShellState();
+}
 
 function getNavigationState(webContents: Electron.WebContents | undefined) {
   if (!webContents || webContents.isDestroyed()) {
@@ -174,6 +201,7 @@ function toPanelState(panel: PanelRuntimeRef) {
       title: getTabTitle(tab),
       url: tab.url,
     })),
+    recentUrls: panelHistory[panel.panelIndex] ?? [],
     title: activeTab?.title ?? "",
     url: activeTab?.url ?? "",
   };
@@ -278,12 +306,10 @@ function applyPanelVideoFullscreenBounds(panelIndex: number) {
 
 function enterPanelVideoFullscreen(panelIndex: number, tab: PanelTab) {
   stopLayoutAnimation();
-  preventNativeFullscreen();
   panelVideoFullscreen = { panelIndex, tabId: tab.id };
   applyPanelVideoFullscreenBounds(panelIndex);
   logPanel(panelIndex, "panel-video-fullscreen-enter", { tabId: tab.id });
   broadcastShellState();
-  setImmediate(() => preventNativeFullscreen());
 }
 
 function exitPanelVideoFullscreen(panelIndex?: number) {
@@ -362,7 +388,9 @@ function syncPanelTabViews(panelIndex: number, bounds: Bounds) {
   }
 
   const activeTab = getActiveTab(panel);
-  const showActive = Boolean(activeTab && tabHasContent(activeTab));
+  const showActive = Boolean(
+    activeTab && tabHasContent(activeTab) && siteMenuOpenPanelIndex !== panelIndex,
+  );
 
   panel.tabs.forEach((tab) => {
     detachTabView(tab);
@@ -544,6 +572,7 @@ function attachTabListeners(panel: PanelRuntimeRef, tab: PanelTab) {
       tab.url = currentUrl;
       tab.input = currentUrl;
       tab.title = webContents.getTitle() || getTabTitle(tab);
+      maybeRecordActiveTabHistory(panel, tab, currentUrl);
     }
     syncTabState();
   });
@@ -574,12 +603,14 @@ function attachTabListeners(panel: PanelRuntimeRef, tab: PanelTab) {
     }
     tab.url = url;
     tab.input = url;
+    maybeRecordActiveTabHistory(panel, tab, url);
     syncTabState();
   });
 
   webContents.on("did-navigate-in-page", (_event, url) => {
     tab.url = url;
     tab.input = url;
+    maybeRecordActiveTabHistory(panel, tab, url);
     syncTabState();
   });
 
@@ -906,6 +937,15 @@ function hidePanelControls(index: number) {
   broadcastShellState();
 }
 
+function setSiteMenuOpen(panelIndex: number, open: boolean) {
+  if (panelIndex < 0 || panelIndex >= PANEL_COUNT) {
+    return;
+  }
+
+  siteMenuOpenPanelIndex = open ? panelIndex : null;
+  layoutPanels(false);
+}
+
 function setActivePanel(index: number | null, source: InteractionSource) {
   void source;
   const audioChanged = activePanelIndex !== index;
@@ -1161,6 +1201,7 @@ async function loadPanelUrl(index: number, rawInput: string) {
 
   try {
     await activeTab.view.webContents.loadURL(prepared.normalizedUrl);
+    recordPanelHistory(index, prepared.normalizedUrl);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load URL.";
     activeTab.loadError = message;
@@ -1217,7 +1258,7 @@ function goForward(index: number) {
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     backgroundColor: "#020617",
-    fullscreenable: false,
+    fullscreenable: true,
     height: 900,
     minHeight: 640,
     minWidth: 960,
@@ -1229,7 +1270,15 @@ function createMainWindow() {
   mainWindow.on("resize", () => layoutPanels(false));
   mainWindow.on("maximize", () => layoutPanels(false));
   mainWindow.on("unmaximize", () => layoutPanels(false));
-  mainWindow.on("enter-full-screen", () => preventNativeFullscreen());
+  mainWindow.on("enter-full-screen", () => {
+    logShell("enter-full-screen");
+    layoutPanels(false);
+  });
+  mainWindow.on("leave-full-screen", () => {
+    logShell("leave-full-screen");
+    layoutPanels(false);
+  });
+  // Block HTML5 page fullscreen from taking over the entire display; panel fullscreen handles video.
   mainWindow.on("enter-html-full-screen", () => preventNativeFullscreen());
 
   for (let index = 0; index < PANEL_COUNT; index += 1) {
@@ -1275,6 +1324,10 @@ function registerIpcHandlers() {
 
   ipcMain.handle("panel:clear", (_event, request: PanelIndexRequest) => {
     return clearPanel(request.index);
+  });
+
+  ipcMain.handle("panel:clear-history", (_event, request: PanelIndexRequest) => {
+    return clearPanelHistory(request.index);
   });
 
   ipcMain.handle("panel:refresh", async (_event, request: PanelIndexRequest) => {
@@ -1351,6 +1404,10 @@ function registerIpcHandlers() {
     hidePanelControls(request.index);
   });
 
+  ipcMain.handle("panel:site-menu-open", (_event, request: SiteMenuOpenRequest) => {
+    setSiteMenuOpen(request.index, request.open);
+  });
+
   ipcMain.handle("panel:pin-controls", (_event, request: PinControlsRequest) => {
     controlsPinned[request.index] = request.pinned;
     if (request.pinned) {
@@ -1374,6 +1431,7 @@ function registerIpcHandlers() {
 }
 
 async function restorePanels() {
+  panelHistory = readStoredPanelHistory();
   const storedUrls = readStoredUrls();
   await Promise.all(
     storedUrls.map(async (url, index) => {

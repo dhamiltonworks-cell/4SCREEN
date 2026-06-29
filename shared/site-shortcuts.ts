@@ -7,34 +7,7 @@ export type SiteShortcut = {
   url: string;
 };
 
-export const SITE_SHORTCUTS: SiteShortcut[] = [
-  { domain: "youtube.com", id: "youtube", name: "YouTube", url: "https://www.youtube.com" },
-  { domain: "netflix.com", id: "netflix", name: "Netflix", url: "https://www.netflix.com" },
-  { domain: "x.com", id: "x", name: "X", url: "https://x.com" },
-  { domain: "google.com", id: "google", name: "Google", url: "https://www.google.com" },
-  { domain: "espn.com", id: "espn", name: "ESPN", url: "https://www.espn.com" },
-  { domain: "twitch.tv", id: "twitch", name: "Twitch", url: "https://www.twitch.tv" },
-  { domain: "hulu.com", id: "hulu", name: "Hulu", url: "https://www.hulu.com" },
-  { domain: "max.com", id: "max", name: "Max", url: "https://www.max.com" },
-  { domain: "disneyplus.com", id: "disney-plus", name: "Disney+", url: "https://www.disneyplus.com" },
-  { domain: "chatgpt.com", id: "chatgpt", name: "ChatGPT", url: "https://chatgpt.com" },
-  {
-    domain: "xbox.com",
-    fallbackBadge: "X",
-    fallbackClass: "panel__site-icon-fallback--xbox",
-    id: "xbox-cloud",
-    name: "Xbox",
-    url: "https://www.xbox.com/play",
-  },
-  {
-    domain: "playstation.com",
-    fallbackBadge: "PS",
-    fallbackClass: "panel__site-icon-fallback--playstation",
-    id: "playstation",
-    name: "PlayStation",
-    url: "https://www.playstation.com/en-us/remote-play/",
-  },
-];
+export const SITE_SHORTCUTS: SiteShortcut[] = [];
 
 export function getShortcutFaviconUrl(domain: string, size = 32) {
   return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=${size}`;

@@ -1,11 +1,16 @@
 import { existsSync } from "node:fs";
-import { app, BrowserWindow, ipcMain, screen, shell, WebContentsView } from "electron";
+import { app, BrowserWindow, ipcMain, screen, WebContentsView } from "electron";
 import path from "node:path";
 import {
   PANEL_COUNT,
   type ControlsVisibilityRequest,
+  type HomepageAddFromVisitRequest,
+  type HomepageAddRequest,
+  type HomepageRemoveRequest,
+  type HomepageUpdateRequest,
   type PanelIndexRequest,
   type PanelLoadRequest,
+  type PanelMoveRequest,
   type PanelTabRequest,
   type PinControlsRequest,
   type InteractionSource,
@@ -15,21 +20,32 @@ import {
 } from "../shared/types";
 import { preparePanelUrl } from "../shared/url";
 import { createEmptyPanelHistory } from "../shared/panel-history";
+import type { HomepageTileView } from "../shared/homepage";
+import { getPanelSwapTarget } from "../shared/panel-move";
 import {
   easeInOutCubic,
   getAllCellBounds,
   getCellBounds,
   interpolateBounds,
   LAYOUT_ANIMATION_MS,
+  SHELL_PADDING,
   type Bounds,
 } from "../shared/layout";
 import {
+  addStoredHomepageTile,
+  addStoredHomepageTileFromVisit,
   clearStoredPanelHistory,
+  persistPanelSnapshot,
   readStoredPanelHistory,
   readStoredUrls,
+  readStoredVisitHistory,
+  readVisibleHomepageTiles,
   recordStoredPanelHistory,
-  writeStoredUrls,
+  recordStoredVisitHistory,
+  removeStoredHomepageTile,
+  updateStoredHomepageTile,
 } from "./panel-store";
+import type { VisitHistoryEntry } from "../shared/visit-history";
 import {
   createTabId,
   getActiveTab,
@@ -45,11 +61,15 @@ import {
 
 const PANEL_CHROME_HEIGHT_DEFAULT = 168;
 const CONTROLS_HIDE_DELAY_MS = 3500;
-const REVEAL_ZONE_HEIGHT = 72;
+const REVEAL_ZONE_HEIGHT = 12;
 const MOUSE_POLL_MS = 50;
-const CURSOR_HIDE_DELAY_MS = 2500;
+const CURSOR_HIDE_DELAY_MS = 5000;
+const CURSOR_HIDE_STYLE_ID = "fourscreen-cursor-hide";
 const CURSOR_HIDE_CSS = "html, html *, html *:hover { cursor: none !important; }";
 const isDev = !app.isPackaged;
+const DEBUG_PANEL_FS = isDev;
+let lastDebugHoverIndex: number | null = null;
+let lastDebugCursorHidden: boolean | null = null;
 
 let panelChromeHeight = PANEL_CHROME_HEIGHT_DEFAULT;
 let activePanelIndex: number | null = null;
@@ -62,6 +82,8 @@ let layoutAnimationTimer: ReturnType<typeof setInterval> | null = null;
 let layoutAnimationGeneration = 0;
 let cursorHidden = false;
 let panelVideoFullscreen: { panelIndex: number; tabId: string } | null = null;
+let userNativeFullscreen = false;
+let htmlFullscreenTransitionActive = false;
 let lastMouseX = -1;
 let lastMouseY = -1;
 let lastMouseMoveAt = Date.now();
@@ -83,6 +105,20 @@ function logPanel(index: number, message: string, extra?: unknown) {
     return;
   }
   console.log(`[FourScreen panel ${index + 1}] ${message}`);
+}
+
+function logPanelFsDebug(index: number, message: string, extra?: Record<string, unknown>) {
+  if (!DEBUG_PANEL_FS) {
+    return;
+  }
+  logPanel(index, `[fs-debug] ${message}`, extra);
+}
+
+function logShellFsDebug(message: string, extra?: Record<string, unknown>) {
+  if (!DEBUG_PANEL_FS) {
+    return;
+  }
+  logShell(`[fs-debug] ${message}`, extra);
 }
 
 function getRendererHtmlPath() {
@@ -148,10 +184,16 @@ let mainWindow: BrowserWindow | null = null;
 let shellView: WebContentsView | null = null;
 const panels: PanelRuntimeRef[] = [];
 let panelHistory: string[][] = createEmptyPanelHistory();
+let homepageTiles: HomepageTileView[] = [];
+let visitHistory: VisitHistoryEntry[] = [];
 let siteMenuOpenPanelIndex: number | null = null;
 
 function recordPanelHistory(panelIndex: number, url: string) {
   panelHistory = recordStoredPanelHistory(panelIndex, url);
+}
+
+function recordVisit(url: string, title: string) {
+  visitHistory = recordStoredVisitHistory(url, title);
 }
 
 function maybeRecordActiveTabHistory(panel: PanelRuntimeRef, tab: PanelTab, url: string) {
@@ -159,6 +201,7 @@ function maybeRecordActiveTabHistory(panel: PanelRuntimeRef, tab: PanelTab, url:
     return;
   }
   recordPanelHistory(panel.panelIndex, url);
+  recordVisit(url, tab.title || getTabTitle(tab));
 }
 
 function clearPanelHistory(panelIndex: number) {
@@ -213,6 +256,21 @@ function toShellState(): ShellState {
     audioLockedPanelIndex,
     audioPanelIndex,
     focusedPanelIndex,
+    homepageTiles: homepageTiles.map((tile) => ({
+      custom: tile.custom,
+      domain: tile.domain,
+      fallbackBadge: tile.fallbackBadge,
+      fallbackClass: tile.fallbackClass,
+      id: tile.id,
+      name: tile.name,
+      url: tile.url,
+    })),
+    visitHistory: visitHistory.map((entry) => ({
+      id: entry.id,
+      title: entry.title,
+      url: entry.url,
+      visitedAt: entry.visitedAt,
+    })),
     panels: panels.map((panel) => toPanelState(panel)),
     videoFullscreenPanelIndex: panelVideoFullscreen?.panelIndex ?? null,
   };
@@ -223,11 +281,18 @@ function broadcastShellState() {
     return;
   }
   shellView.webContents.send("shell:state-updated", toShellState());
-  writeStoredUrls(panels.map((panel) => getActiveTab(panel)?.url ?? ""));
+}
+
+function persistPanelState() {
+  persistPanelSnapshot(
+    panels.map((panel) => getActiveTab(panel)?.url ?? ""),
+    panelHistory,
+  );
 }
 
 function broadcastPanels() {
   broadcastShellState();
+  persistPanelState();
 }
 
 function getContentSize() {
@@ -266,6 +331,10 @@ function getBrowserBoundsForCell(index: number, cell: Bounds) {
 
 function getTabBoundsForPanel(index: number, cell: Bounds) {
   if (panelVideoFullscreen?.panelIndex === index) {
+    const panel = panels[index];
+    if (panel?.controlsVisible) {
+      return getBrowserBoundsForCell(index, cell);
+    }
     return { ...cell };
   }
   return getBrowserBoundsForCell(index, cell);
@@ -285,30 +354,50 @@ function preventNativeFullscreen() {
   }
 }
 
-function applyPanelVideoFullscreenBounds(panelIndex: number) {
+function preventWindowResizeFromHtmlFullscreen(source: string) {
+  logShellFsDebug("prevent-window-resize-from-html-fullscreen", {
+    isFullScreen: mainWindow?.isFullScreen() ?? null,
+    isMaximized: mainWindow?.isMaximized?.() ?? null,
+    isSimpleFullScreen: mainWindow?.isSimpleFullScreen?.() ?? null,
+    panelVideoFullscreen,
+    source,
+    userNativeFullscreen,
+  });
+  preventNativeFullscreen();
+}
+
+function getPanelVideoFullscreenDebugState(panelIndex: number) {
   const panel = panels[panelIndex];
-  if (!panel || !mainWindow) {
-    return;
-  }
-
-  const tab =
-    panel.tabs.find((candidate) => candidate.id === panelVideoFullscreen?.tabId) ?? getActiveTab(panel);
-  if (!tab || tab.view.webContents.isDestroyed()) {
-    return;
-  }
-
-  const cell =
-    currentCellBounds[panelIndex] ?? getCellBounds(panelIndex, focusedPanelIndex, getContentSize());
-  tab.view.setBounds({ ...cell });
-  tab.view.setVisible(true);
-  bringTabToFront(tab);
+  const cell = currentCellBounds[panelIndex] ?? getCellBounds(panelIndex, focusedPanelIndex, getContentSize());
+  const tabBounds = getTabBoundsForPanel(panelIndex, cell);
+  return {
+    activePanelIndex,
+    cell,
+    controlsPinned: controlsPinned[panelIndex],
+    controlsVisible: panel?.controlsVisible ?? null,
+    cursorHidden,
+    focusedPanelIndex,
+    hoveredIndex: previousHoveredIndex,
+    panelVideoFullscreen,
+    tabBounds,
+    userNativeFullscreen,
+  };
 }
 
 function enterPanelVideoFullscreen(panelIndex: number, tab: PanelTab) {
   stopLayoutAnimation();
+  const panel = panels[panelIndex];
+  logPanelFsDebug(panelIndex, "enter-request", {
+    controlsPinned: controlsPinned[panelIndex],
+    controlsVisible: panel?.controlsVisible ?? null,
+    source: "panel-fullscreen-request",
+    tabId: tab.id,
+    userNativeFullscreen,
+  });
   panelVideoFullscreen = { panelIndex, tabId: tab.id };
-  applyPanelVideoFullscreenBounds(panelIndex);
+  layoutPanels(false);
   logPanel(panelIndex, "panel-video-fullscreen-enter", { tabId: tab.id });
+  logPanelFsDebug(panelIndex, "enter-applied", getPanelVideoFullscreenDebugState(panelIndex));
   broadcastShellState();
 }
 
@@ -321,10 +410,15 @@ function exitPanelVideoFullscreen(panelIndex?: number) {
     return;
   }
 
-  const { panelIndex: activePanelIndex, tabId } = panelVideoFullscreen;
-  logPanel(activePanelIndex, "panel-video-fullscreen-exit", { tabId });
+  const { panelIndex: exitingPanelIndex, tabId } = panelVideoFullscreen;
+  logPanelFsDebug(exitingPanelIndex, "exit-request", {
+    controlsVisible: panels[exitingPanelIndex]?.controlsVisible ?? null,
+    tabId,
+  });
+  logPanel(exitingPanelIndex, "panel-video-fullscreen-exit", { tabId });
   panelVideoFullscreen = null;
   layoutPanels(false);
+  logPanelFsDebug(exitingPanelIndex, "exit-applied", getPanelVideoFullscreenDebugState(exitingPanelIndex));
   broadcastShellState();
 }
 
@@ -335,6 +429,44 @@ function clearPanelVideoFullscreenForTab(panelIndex: number, tabId: string) {
 }
 
 const HIDDEN_TAB_BOUNDS: Bounds = { height: 0, width: 0, x: 0, y: 0 };
+
+function boundsEqual(left: Bounds, right: Bounds) {
+  return (
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  );
+}
+
+function isTabAttached(tab: PanelTab) {
+  if (!mainWindow || tab.view.webContents.isDestroyed()) {
+    return false;
+  }
+
+  return mainWindow.contentView.children.includes(tab.view);
+}
+
+const attachedTabBounds = new WeakMap<PanelTab, Bounds>();
+
+function getFocusedPanelTab(): PanelTab | null {
+  for (const panel of panels) {
+    for (const tab of panel.tabs) {
+      if (!tab.view.webContents.isDestroyed() && tab.view.webContents.isFocused()) {
+        return tab;
+      }
+    }
+  }
+  return null;
+}
+
+function restoreFocusedPanelTab(tab: PanelTab | null) {
+  if (!tab || tab.view.webContents.isDestroyed()) {
+    return;
+  }
+
+  tab.view.webContents.focus();
+}
 
 function bringTabToFront(tab: PanelTab) {
   if (!mainWindow || tab.view.webContents.isDestroyed()) {
@@ -392,12 +524,28 @@ function syncPanelTabViews(panelIndex: number, bounds: Bounds) {
     activeTab && tabHasContent(activeTab) && siteMenuOpenPanelIndex !== panelIndex,
   );
 
-  panel.tabs.forEach((tab) => {
-    detachTabView(tab);
-  });
+  for (const tab of panel.tabs) {
+    const shouldShow = showActive && tab.id === panel.activeTabId;
+    if (!shouldShow) {
+      if (isTabAttached(tab)) {
+        detachTabView(tab);
+      }
+      attachedTabBounds.delete(tab);
+      continue;
+    }
 
-  if (showActive && activeTab) {
-    attachTabView(activeTab, bounds);
+    const previousBounds = attachedTabBounds.get(tab);
+    if (isTabAttached(tab)) {
+      if (!previousBounds || !boundsEqual(previousBounds, bounds)) {
+        tab.view.setBounds(bounds);
+        attachedTabBounds.set(tab, { ...bounds });
+      }
+      tab.view.setVisible(true);
+      continue;
+    }
+
+    attachTabView(tab, bounds);
+    attachedTabBounds.set(tab, { ...bounds });
   }
 
   logTabViewVisibility(panelIndex, panel);
@@ -428,7 +576,16 @@ function applyBrowserBounds(index: number, cell: Bounds) {
     return;
   }
 
-  syncPanelTabViews(index, getTabBoundsForPanel(index, cell));
+  const bounds = getTabBoundsForPanel(index, cell);
+  if (DEBUG_PANEL_FS && (index === 0 || panelVideoFullscreen?.panelIndex === index)) {
+    logPanelFsDebug(index, "bounds-update", {
+      cell,
+      bounds,
+      controlsVisible: panel.controlsVisible,
+      panelVideoFullscreen,
+    });
+  }
+  syncPanelTabViews(index, bounds);
 }
 
 function stopLayoutAnimation() {
@@ -444,6 +601,7 @@ function layoutPanels(animate = false) {
     animate = false;
   }
 
+  const focusedTab = getFocusedPanelTab();
   const targetCellBounds = getTargetCellBounds();
 
   if (!animate) {
@@ -455,6 +613,7 @@ function layoutPanels(animate = false) {
     if (shellView) {
       shellView.setBounds(getShellBounds());
     }
+    restoreFocusedPanelTab(focusedTab);
     return;
   }
 
@@ -484,6 +643,7 @@ function layoutPanels(animate = false) {
       panels.forEach((_, index) => {
         applyBrowserBounds(index, currentCellBounds[index]);
       });
+      restoreFocusedPanelTab(focusedTab);
     }
   }, 16);
 
@@ -579,6 +739,7 @@ function attachTabListeners(panel: PanelRuntimeRef, tab: PanelTab) {
 
   webContents.on("did-stop-loading", () => {
     logPanel(panelIndex, "did-stop-loading", { tabId: tab.id, url: webContents.getURL() });
+    void setPanelCursorHidden(tab, cursorHidden);
     syncTabState();
   });
 
@@ -615,10 +776,26 @@ function attachTabListeners(panel: PanelRuntimeRef, tab: PanelTab) {
   });
 
   webContents.on("enter-html-full-screen", () => {
+    htmlFullscreenTransitionActive = true;
+    logPanelFsDebug(panelIndex, "html-fullscreen-enter-event", {
+      tabId: tab.id,
+      userNativeFullscreen,
+    });
+    if (!userNativeFullscreen) {
+      preventWindowResizeFromHtmlFullscreen("webcontents-enter-html-full-screen");
+    }
     enterPanelVideoFullscreen(panelIndex, tab);
+    queueMicrotask(() => {
+      htmlFullscreenTransitionActive = false;
+    });
   });
 
   webContents.on("leave-html-full-screen", () => {
+    logPanelFsDebug(panelIndex, "html-fullscreen-leave-event", {
+      activeFullscreenTabId: panelVideoFullscreen?.tabId ?? null,
+      panelVideoFullscreenIndex: panelVideoFullscreen?.panelIndex ?? null,
+      tabId: tab.id,
+    });
     if (panelVideoFullscreen?.tabId === tab.id) {
       exitPanelVideoFullscreen(panelIndex);
     }
@@ -642,7 +819,6 @@ function addTab(panel: PanelRuntimeRef, initialUrl?: string, parentTabId: string
   }
 
   const tab: PanelTab = {
-    cursorHideStyleKey: "",
     id: createTabId(panel.panelIndex, panel.tabCounter),
     input: initialUrl ?? "",
     isPrimary,
@@ -948,23 +1124,32 @@ function setSiteMenuOpen(panelIndex: number, open: boolean) {
 
 function setActivePanel(index: number | null, source: InteractionSource) {
   void source;
-  const audioChanged = activePanelIndex !== index;
+  const indexChanged = activePanelIndex !== index;
+  if (!indexChanged) {
+    return;
+  }
+
   activePanelIndex = index;
 
-  if (
-    audioLockedPanelIndex === null &&
-    focusedPanelIndex === null &&
-    index !== null &&
-    audioChanged
-  ) {
+  if (audioLockedPanelIndex === null && focusedPanelIndex === null && index !== null) {
     applyAudioFocus(index);
   }
 
   broadcastShellState();
 }
 
-function applyAudioFocus(index: number | null) {
-  const effectiveIndex = audioLockedPanelIndex ?? index;
+function getEffectiveAudioPanelIndex(hoverIndex: number | null) {
+  if (audioLockedPanelIndex !== null) {
+    return audioLockedPanelIndex;
+  }
+  if (focusedPanelIndex !== null) {
+    return focusedPanelIndex;
+  }
+  return hoverIndex;
+}
+
+function applyAudioFocus(hoverIndex: number | null) {
+  const effectiveIndex = getEffectiveAudioPanelIndex(hoverIndex);
   audioPanelIndex = effectiveIndex;
   panels.forEach((panel, panelIndex) => {
     const shouldMute = effectiveIndex !== null && panelIndex !== effectiveIndex;
@@ -988,10 +1173,10 @@ function toggleAudioLock(panelIndex: number) {
 
   if (audioLockedPanelIndex === panelIndex) {
     audioLockedPanelIndex = null;
-    applyAudioFocus(focusedPanelIndex ?? activePanelIndex);
+    applyAudioFocus(activePanelIndex);
   } else {
     audioLockedPanelIndex = panelIndex;
-    applyAudioFocus(panelIndex);
+    applyAudioFocus(activePanelIndex);
   }
 
   broadcastShellState();
@@ -1015,37 +1200,63 @@ async function setPanelCursorHidden(tab: PanelTab, hidden: boolean) {
     return;
   }
 
-  if (hidden) {
-    if (!tab.cursorHideStyleKey) {
-      tab.cursorHideStyleKey = await tab.view.webContents.insertCSS(CURSOR_HIDE_CSS);
-    }
-    return;
-  }
+  const script = hidden
+    ? `(function(){var id=${JSON.stringify(CURSOR_HIDE_STYLE_ID)};if(document.getElementById(id))return;var s=document.createElement("style");s.id=id;s.textContent=${JSON.stringify(CURSOR_HIDE_CSS)};document.documentElement.appendChild(s);})()`
+    : `(function(){document.getElementById(${JSON.stringify(CURSOR_HIDE_STYLE_ID)})?.remove();})()`;
 
-  if (tab.cursorHideStyleKey) {
-    await tab.view.webContents.removeInsertedCSS(tab.cursorHideStyleKey);
-    tab.cursorHideStyleKey = "";
+  try {
+    await tab.view.webContents.executeJavaScript(script, true);
+  } catch {
+    // Ignore pages that block script execution; shell cursor still syncs.
   }
 }
 
-async function setCursorHidden(hidden: boolean) {
-  if (cursorHidden === hidden) {
-    return;
-  }
-
-  cursorHidden = hidden;
-  setShellCursorHidden(hidden);
+async function syncAllPanelCursorsHidden(hidden: boolean) {
   await Promise.all(
     panels.flatMap((panel) => panel.tabs.map((tab) => setPanelCursorHidden(tab, hidden))),
   );
 }
 
+async function ensureCursorVisible() {
+  setShellCursorHidden(false);
+  await syncAllPanelCursorsHidden(false);
+  cursorHidden = false;
+}
+
+async function setCursorHidden(hidden: boolean) {
+  if (cursorHidden === hidden && hidden) {
+    return;
+  }
+
+  if (!hidden) {
+    await ensureCursorVisible();
+    return;
+  }
+
+  cursorHidden = true;
+  if (DEBUG_PANEL_FS && lastDebugCursorHidden !== hidden) {
+    lastDebugCursorHidden = hidden;
+    logShellFsDebug("cursor-visibility", {
+      cursorHidden: hidden,
+      hoveredIndex: previousHoveredIndex,
+      panelVideoFullscreen,
+    });
+  }
+  setShellCursorHidden(true);
+  await syncAllPanelCursorsHidden(true);
+}
+
 function noteMouseMovement(x: number, y: number) {
-  if (x !== lastMouseX || y !== lastMouseY) {
-    lastMouseX = x;
-    lastMouseY = y;
-    lastMouseMoveAt = Date.now();
-    void setCursorHidden(false);
+  const moved = x !== lastMouseX || y !== lastMouseY;
+  if (!moved) {
+    return;
+  }
+
+  lastMouseX = x;
+  lastMouseY = y;
+  lastMouseMoveAt = Date.now();
+  if (cursorHidden) {
+    void ensureCursorVisible();
   }
 }
 
@@ -1059,22 +1270,32 @@ function pollDesktopInteraction() {
   const x = point.x - contentBounds.x;
   const y = point.y - contentBounds.y;
 
-  if (mainWindow.isFocused()) {
-    noteMouseMovement(x, y);
-  } else if (cursorHidden) {
-    void setCursorHidden(false);
-  }
+  noteMouseMovement(x, y);
 
   if (!mainWindow.isFocused()) {
+    if (cursorHidden) {
+      void setCursorHidden(false);
+    }
     return;
   }
 
   const hoveredIndex = getPanelIndexAtPoint(x, y);
 
+  if (DEBUG_PANEL_FS && hoveredIndex !== lastDebugHoverIndex) {
+    lastDebugHoverIndex = hoveredIndex;
+    logShellFsDebug("hover-state", {
+      hoveredIndex,
+      panelVideoFullscreen,
+      pointer: { x, y },
+      screen1ControlsVisible: panels[0]?.controlsVisible ?? null,
+      screen1NearTop:
+        hoveredIndex === 0
+          ? y - (currentCellBounds[0]?.y ?? SHELL_PADDING) <= REVEAL_ZONE_HEIGHT
+          : null,
+    });
+  }
+
   if (hoveredIndex !== previousHoveredIndex) {
-    if (hoveredIndex !== null) {
-      revealPanelControls(hoveredIndex);
-    }
     previousHoveredIndex = hoveredIndex;
   }
 
@@ -1083,10 +1304,12 @@ function pollDesktopInteraction() {
     if (panel && panelHasContent(panel)) {
       const cell = currentCellBounds[hoveredIndex] ?? getCellBounds(hoveredIndex, focusedPanelIndex, getContentSize());
       const relativeY = y - cell.y;
-      const nearTop = relativeY <= REVEAL_ZONE_HEIGHT;
+      const nearTop = relativeY >= 0 && relativeY <= REVEAL_ZONE_HEIGHT;
       const inChrome = panel.controlsVisible && relativeY <= panelChromeHeight;
-      if (nearTop || inChrome) {
+      if (nearTop) {
         revealPanelControls(hoveredIndex);
+      } else if (inChrome) {
+        touchPanelControls(hoveredIndex);
       }
     }
   }
@@ -1132,7 +1355,7 @@ function focusPanel(index: number) {
   }
 
   focusedPanelIndex = index;
-  applyAudioFocus(index);
+  applyAudioFocus(activePanelIndex);
   revealPanelControls(index);
   layoutPanels(true);
   broadcastShellState();
@@ -1145,10 +1368,115 @@ function unfocusPanel() {
   }
 
   focusedPanelIndex = null;
-  if (audioLockedPanelIndex === null) {
-    applyAudioFocus(activePanelIndex);
-  }
+  applyAudioFocus(activePanelIndex);
   layoutPanels(true);
+  broadcastShellState();
+  return toShellState();
+}
+
+function remapIndex(index: number | null, left: number, right: number): number | null {
+  if (index === null) {
+    return null;
+  }
+  if (index === left) {
+    return right;
+  }
+  if (index === right) {
+    return left;
+  }
+  return index;
+}
+
+function swapArrayValues<T>(array: T[], left: number, right: number) {
+  [array[left], array[right]] = [array[right], array[left]];
+}
+
+function swapPanels(left: number, right: number) {
+  if (left === right || left < 0 || right < 0 || left >= PANEL_COUNT || right >= PANEL_COUNT) {
+    return toShellState();
+  }
+
+  swapArrayValues(panels, left, right);
+  panels[left].panelIndex = left;
+  panels[right].panelIndex = right;
+
+  swapArrayValues(panelHistory, left, right);
+  swapArrayValues(controlsPinned, left, right);
+  swapArrayValues(lastControlsInteractionAt, left, right);
+
+  audioLockedPanelIndex = remapIndex(audioLockedPanelIndex, left, right);
+  activePanelIndex = remapIndex(activePanelIndex, left, right);
+  focusedPanelIndex = remapIndex(focusedPanelIndex, left, right);
+  siteMenuOpenPanelIndex = remapIndex(siteMenuOpenPanelIndex, left, right);
+
+  if (panelVideoFullscreen) {
+    const nextPanelIndex = remapIndex(panelVideoFullscreen.panelIndex, left, right);
+    if (nextPanelIndex !== null) {
+      panelVideoFullscreen = {
+        ...panelVideoFullscreen,
+        panelIndex: nextPanelIndex,
+      };
+    }
+  }
+
+  applyAudioFocus(activePanelIndex);
+  layoutPanels(false);
+  broadcastShellState();
+  persistPanelState();
+  return toShellState();
+}
+
+function movePanel(index: number, direction: PanelMoveRequest["direction"]) {
+  const target = getPanelSwapTarget(index, direction);
+  if (target === null) {
+    return toShellState();
+  }
+  return swapPanels(index, target);
+}
+
+function addHomepageTile(name: string, url: string) {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    throw new Error("Enter a site name for this homepage icon.");
+  }
+
+  const prepared = preparePanelUrl(url);
+  if (!prepared.ok) {
+    throw new Error(prepared.error);
+  }
+
+  homepageTiles = addStoredHomepageTile(trimmedName, prepared.normalizedUrl);
+  broadcastShellState();
+  return toShellState();
+}
+
+function removeHomepageTile(tileId: string) {
+  if (!tileId) {
+    return toShellState();
+  }
+
+  homepageTiles = removeStoredHomepageTile(tileId);
+  broadcastShellState();
+  return toShellState();
+}
+
+function updateHomepageTile(tileId: string, name: string, url: string) {
+  if (!tileId) {
+    return toShellState();
+  }
+
+  homepageTiles = updateStoredHomepageTile(tileId, name, url);
+  broadcastShellState();
+  return toShellState();
+}
+
+function addHomepageTileFromVisit(visitId: string) {
+  if (!visitId) {
+    return toShellState();
+  }
+
+  homepageTiles = addStoredHomepageTileFromVisit(visitId);
+  visitHistory = readStoredVisitHistory();
   broadcastShellState();
   return toShellState();
 }
@@ -1197,11 +1525,15 @@ async function loadPanelUrl(index: number, rawInput: string) {
   touchPanelControls(index);
 
   layoutPanels(false);
+  // Broadcast URL + layout before loadURL completes so the shell can hide Quick Launch
+  // without changing focus handling or WebContentsView interaction.
+  broadcastShellState();
   logPanel(index, "loadURL", prepared.normalizedUrl);
 
   try {
     await activeTab.view.webContents.loadURL(prepared.normalizedUrl);
     recordPanelHistory(index, prepared.normalizedUrl);
+    recordVisit(prepared.normalizedUrl, activeTab.title || prepared.normalizedUrl);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load URL.";
     activeTab.loadError = message;
@@ -1210,6 +1542,7 @@ async function loadPanelUrl(index: number, rawInput: string) {
   }
 
   broadcastShellState();
+  persistPanelState();
   return toShellState();
 }
 
@@ -1232,6 +1565,7 @@ function clearPanel(index: number) {
 
   layoutPanels(false);
   broadcastShellState();
+  persistPanelState();
   return toShellState();
 }
 
@@ -1256,6 +1590,10 @@ function goForward(index: number) {
 }
 
 function createMainWindow() {
+  homepageTiles = readVisibleHomepageTiles();
+  visitHistory = readStoredVisitHistory();
+  panelHistory = readStoredPanelHistory();
+
   mainWindow = new BrowserWindow({
     backgroundColor: "#020617",
     fullscreenable: true,
@@ -1268,18 +1606,40 @@ function createMainWindow() {
   });
 
   mainWindow.on("resize", () => layoutPanels(false));
-  mainWindow.on("maximize", () => layoutPanels(false));
-  mainWindow.on("unmaximize", () => layoutPanels(false));
+  mainWindow.on("maximize", () => {
+    logShellFsDebug("maximize", {
+      isFullScreen: mainWindow?.isFullScreen() ?? null,
+      panelVideoFullscreen,
+      userNativeFullscreen,
+    });
+    layoutPanels(false);
+  });
+  mainWindow.on("unmaximize", () => {
+    logShellFsDebug("unmaximize", {
+      isFullScreen: mainWindow?.isFullScreen() ?? null,
+      panelVideoFullscreen,
+      userNativeFullscreen,
+    });
+    layoutPanels(false);
+  });
   mainWindow.on("enter-full-screen", () => {
+    logShellFsDebug("enter-full-screen", {
+      htmlFullscreenTransitionActive,
+      panelVideoFullscreen,
+      userNativeFullscreen,
+    });
+    if (!htmlFullscreenTransitionActive) {
+      userNativeFullscreen = true;
+    }
     logShell("enter-full-screen");
     layoutPanels(false);
   });
   mainWindow.on("leave-full-screen", () => {
+    userNativeFullscreen = false;
+    logShellFsDebug("leave-full-screen", { panelVideoFullscreen });
     logShell("leave-full-screen");
     layoutPanels(false);
   });
-  // Block HTML5 page fullscreen from taking over the entire display; panel fullscreen handles video.
-  mainWindow.on("enter-html-full-screen", () => preventNativeFullscreen());
 
   for (let index = 0; index < PANEL_COUNT; index += 1) {
     createPanelView(index);
@@ -1383,12 +1743,24 @@ function registerIpcHandlers() {
     return unfocusPanel();
   });
 
-  ipcMain.handle("panel:open-external", async (_event, request: PanelIndexRequest) => {
-    const panel = panels[request.index];
-    const activeTab = panel ? getActiveTab(panel) : null;
-    if (tabHasContent(activeTab) && activeTab) {
-      await shell.openExternal(activeTab.url);
-    }
+  ipcMain.handle("panel:move", (_event, request: PanelMoveRequest) => {
+    return movePanel(request.index, request.direction);
+  });
+
+  ipcMain.handle("homepage:add", (_event, request: HomepageAddRequest) => {
+    return addHomepageTile(request.name, request.url);
+  });
+
+  ipcMain.handle("homepage:add-from-visit", (_event, request: HomepageAddFromVisitRequest) => {
+    return addHomepageTileFromVisit(request.visitId);
+  });
+
+  ipcMain.handle("homepage:remove", (_event, request: HomepageRemoveRequest) => {
+    return removeHomepageTile(request.tileId);
+  });
+
+  ipcMain.handle("homepage:update", (_event, request: HomepageUpdateRequest) => {
+    return updateHomepageTile(request.tileId, request.name, request.url);
   });
 
   ipcMain.handle("panel:controls-visible", (_event, request: ControlsVisibilityRequest) => {
@@ -1425,13 +1797,19 @@ function registerIpcHandlers() {
     if (!Number.isFinite(height) || height < 80 || height > 320) {
       return;
     }
-    panelChromeHeight = Math.round(height);
+    const nextHeight = Math.round(height);
+    if (nextHeight === panelChromeHeight) {
+      return;
+    }
+    panelChromeHeight = nextHeight;
     layoutPanels(false);
   });
 }
 
 async function restorePanels() {
   panelHistory = readStoredPanelHistory();
+  homepageTiles = readVisibleHomepageTiles();
+  visitHistory = readStoredVisitHistory();
   const storedUrls = readStoredUrls();
   await Promise.all(
     storedUrls.map(async (url, index) => {

@@ -28,11 +28,30 @@ export type PanelState = {
 
 export type PanelsSnapshot = PanelState[];
 
+export type HomepageTileState = {
+  custom: boolean;
+  domain: string;
+  fallbackBadge?: string;
+  fallbackClass?: string;
+  id: string;
+  name: string;
+  url: string;
+};
+
+export type VisitHistoryEntryState = {
+  id: string;
+  title: string;
+  url: string;
+  visitedAt: number;
+};
+
 export type ShellState = {
   activePanelIndex: number | null;
   audioLockedPanelIndex: number | null;
   audioPanelIndex: number | null;
   focusedPanelIndex: number | null;
+  homepageTiles: HomepageTileState[];
+  visitHistory: VisitHistoryEntryState[];
   videoFullscreenPanelIndex: number | null;
   panels: PanelsSnapshot;
 };
@@ -69,4 +88,28 @@ export type PinControlsRequest = {
 export type SetActivePanelRequest = {
   index: number | null;
   source: InteractionSource;
+};
+
+export type HomepageAddRequest = {
+  name: string;
+  url: string;
+};
+
+export type HomepageRemoveRequest = {
+  tileId: string;
+};
+
+export type HomepageUpdateRequest = {
+  name: string;
+  tileId: string;
+  url: string;
+};
+
+export type HomepageAddFromVisitRequest = {
+  visitId: string;
+};
+
+export type PanelMoveRequest = {
+  direction: "down" | "left" | "right" | "up";
+  index: number;
 };

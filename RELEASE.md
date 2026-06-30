@@ -8,7 +8,7 @@ This document explains how to build, package, and publish **FourScreen** (applic
 |-------|-------|
 | Product name | FourScreen |
 | Application name | 4SCREEN |
-| Version | 1.0.1 |
+| Version | 1.0.6 |
 | Description | View multiple websites, streams, dashboards, and tools simultaneously. |
 
 ## Prerequisites
@@ -82,9 +82,9 @@ Typical artifacts:
 
 | Platform | Example filename |
 |----------|------------------|
-| macOS (Apple Silicon) | `release/FourScreen-1.0.1-mac-arm64.dmg` |
-| macOS (Intel) | `release/FourScreen-1.0.1-mac-x64.dmg` |
-| Windows | `release/FourScreen-1.0.1-win-x64.exe` |
+| macOS (Apple Silicon) | `release/FourScreen-1.0.6-mac-arm64.dmg` |
+| macOS (Intel) | `release/FourScreen-1.0.6-mac-x64.dmg` |
+| Windows | `release/FourScreen-1.0.6-win-x64.exe` |
 
 During packaging, electron-builder also creates intermediate folders under `release/` (for example `release/mac-arm64/FourScreen.app`).
 
@@ -118,8 +118,8 @@ Windows builds use `icon.png`; electron-builder converts it during packaging. Fo
 1. Tag the release:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 2. Build installers on each target platform (or CI):
@@ -132,12 +132,12 @@ npm run dist:win
 3. Create the GitHub release:
 
 ```bash
-gh release create v1.0.1 \
-  release/FourScreen-1.0.1-mac-arm64.dmg \
-  release/FourScreen-1.0.1-mac-x64.dmg \
-  release/FourScreen-1.0.1-win-x64.exe \
-  --title "FourScreen 1.0.1" \
-  --notes "Native macOS fullscreen support (menu bar and Dock hidden, green button enabled). Focus Mode, Audio Mode, and panel video fullscreen unchanged."
+gh release create v1.0.3 \
+  release/FourScreen-1.0.3-mac-arm64.dmg \
+  release/FourScreen-1.0.3-mac-x64.dmg \
+  release/FourScreen-1.0.3-win-x64.exe \
+  --title "FourScreen 1.0.3" \
+  --notes "Quick Launch tile management: right-click menu (Open, Edit, Delete), hover trash delete with confirmation, edit custom tiles, compact homepage with sports/streaming defaults, one-click loading overlay, and stability fixes."
 ```
 
 Or use the GitHub website: **Releases → Draft a new release → attach files from `release/`**.
@@ -150,7 +150,7 @@ electron-builder includes:
 - `package.json` metadata
 - Electron runtime
 
-User data (saved panel URLs, history, sessions) is **not** bundled; it is stored at runtime in the OS app data directory.
+User data (saved panel URLs, history, sessions, homepage tiles) is **not** bundled; it is stored at runtime in the OS app data directory.
 
 ## Troubleshooting
 
@@ -162,6 +162,42 @@ User data (saved panel URLs, history, sessions) is **not** bundled; it is stored
 | Icon not updating | Replace files in `build/icons/` and rebuild |
 
 ## Changelog
+
+### 1.0.6
+
+- **Add Tile modal UI** — Centered overlay with high z-index and dimmed blurred backdrop so the Quick Launch add/edit dialog stays visible above shell content (UI-only; no interaction logic changes)
+
+### 1.0.5
+
+- **Stability rollback** — Restores v1.0.3 interaction behavior by removing post-1.0.3 hover/pointer sync, modal overlay layering, and Clear-panel interaction refresh experiments that caused UI regressions
+- Includes all v1.0.3 Quick Launch features: tile management, one-click loading, compact homepage, and collapsible history
+
+### 1.0.4
+
+- **Add/Edit tile modal overlay** — Quick Launch add/edit dialog always appears centered above all panels and webviews with dimmed blurred backdrop (superseded by 1.0.5 rollback)
+
+### 1.0.3
+
+- **Quick Launch tile management** — Right-click any tile for Open, Edit (custom tiles), Delete, and Cancel
+- **Hover trash delete** — Small corner trash icon on hover with confirmation before removal
+- **Built-in tile removal** — Hides preset tiles per user; stays hidden after restart
+- **Custom tile editing** — Change name and URL for user-added tiles; persisted locally
+- **Custom tile deletion** — Permanently removes custom tiles from saved storage
+- **Compact Quick Launch** — Smaller tiles, collapsible history, priority-ordered defaults for sports/streaming/gaming
+- **One-click loading** — Homepage hides instantly with loading indicator when a tile is clicked
+- **Homepage scroll fix** — No scrollbar unless tile count exceeds visible area
+
+### 1.0.2
+
+- **Homepage Quick Launch** — Built-in preset tiles on every empty panel for one-click loading
+- **Custom homepage icons (+)** — Add unlimited custom tiles with site name and URL; persisted locally across restarts
+- **Homepage icon removal** — Right-click any tile (preset or custom) to remove; removals persist
+- **Homepage layout polish** — Empty panels prioritize Quick Launch visibility with tighter control chrome and centered grid
+- **Audio Lock improvements** — Audio Lock available on all four screens; lock/focus/hover priority preserved; lock follows panel when moved
+- **Panel movement controls** — Compact D-pad swaps panel positions without reload; preserves sites, tabs, history, sessions, audio lock, and focus
+- **Fullscreen fixes** — Panel HTML video fullscreen contained to panel; native window maximize/fullscreen no longer blocked by page fullscreen events
+- **Cursor inactivity fixes** — Cursor auto-hides after 5 seconds of inactivity; resyncs after navigation and movement
+- **Control center improvements** — Thinner reveal zone, compact D-pad movement control, denser empty-panel chrome
 
 ### 1.0.1
 

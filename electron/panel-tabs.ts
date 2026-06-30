@@ -1,7 +1,6 @@
 import type { WebContentsView } from "electron";
 
 export type PanelTab = {
-  cursorHideStyleKey: string;
   disposeListeners?: () => void;
   id: string;
   input: string;

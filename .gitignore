@@ -1,6 +1,14 @@
 node_modules
 dist
 release
+Release-Test/
 .next
 .DS_Store
 *.tsbuildinfo
+
+# Local user data (stored in Electron userData at runtime — never commit)
+panels.json
+settings.json
+history.json
+recent-sites.json
+userData/

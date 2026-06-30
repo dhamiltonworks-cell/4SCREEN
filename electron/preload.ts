@@ -3,8 +3,12 @@ import type { FourScreenApi } from "../shared/ipc";
 import type { ShellState } from "../shared/types";
 
 const api: FourScreenApi = {
+  addHomepageTile: (request) => ipcRenderer.invoke("homepage:add", request),
+  addHomepageTileFromVisit: (request) => ipcRenderer.invoke("homepage:add-from-visit", request),
   clearPanel: (request) => ipcRenderer.invoke("panel:clear", request),
   clearPanelHistory: (request) => ipcRenderer.invoke("panel:clear-history", request),
+  removeHomepageTile: (request) => ipcRenderer.invoke("homepage:remove", request),
+  updateHomepageTile: (request) => ipcRenderer.invoke("homepage:update", request),
   closeActivePanelTab: (request) => ipcRenderer.invoke("panel:close-active-tab", request),
   closePanelPopups: (request) => ipcRenderer.invoke("panel:close-popups", request),
   closePanelTab: (request) => ipcRenderer.invoke("panel:close-tab", request),
@@ -13,6 +17,7 @@ const api: FourScreenApi = {
   goBack: (request) => ipcRenderer.invoke("panel:go-back", request),
   goForward: (request) => ipcRenderer.invoke("panel:go-forward", request),
   loadPanel: (request) => ipcRenderer.invoke("panel:load", request),
+  movePanel: (request) => ipcRenderer.invoke("panel:move", request),
   onShellStateUpdated: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, state: ShellState) => {
       callback(state);
@@ -20,7 +25,6 @@ const api: FourScreenApi = {
     ipcRenderer.on("shell:state-updated", listener);
     return () => ipcRenderer.removeListener("shell:state-updated", listener);
   },
-  openExternal: (request) => ipcRenderer.invoke("panel:open-external", request),
   pinPanelControls: (request) => ipcRenderer.invoke("panel:pin-controls", request),
   refreshPanel: (request) => ipcRenderer.invoke("panel:refresh", request),
   setActivePanel: (request) => ipcRenderer.invoke("shell:set-active-panel", request),
